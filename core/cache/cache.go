@@ -210,3 +210,33 @@ func (c *Cache) GetRandomEndpoints(count int) ([]string, error) {
 	}
 	return endpoints, nil
 }
+
+// GetDistinctRandomEndpoints retrieves N distinct random endpoints that have not failed more than maxFailures.
+func (c *Cache) GetDistinctRandomEndpoints(count int) ([]string, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	var available []Endpoint
+	for _, endpoint := range c.Endpoints {
+		if endpoint.Failures < maxFailures {
+			available = append(available, endpoint)
+		}
+	}
+
+	if len(available) < count {
+		return nil, fmt.Errorf("not enough endpoints: need %d, have %d", count, len(available))
+	}
+
+	// Shuffle to randomize selection
+	rand.Shuffle(len(available), func(i, j int) {
+		available[i], available[j] = available[j], available[i]
+	})
+
+	// Take first N
+	result := make([]string, count)
+	for i := 0; i < count; i++ {
+		result[i] = available[i].Address
+	}
+
+	return result, nil
+}

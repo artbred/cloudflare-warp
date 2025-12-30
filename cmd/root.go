@@ -69,6 +69,7 @@ func init() {
 
 	// Add subcommands
 	rootCmd.AddCommand(RunCmd)
+	rootCmd.AddCommand(RotateCmd)
 	rootCmd.AddCommand(ScannerCmd)
 	rootCmd.AddCommand(GenerateCmd)
 	rootCmd.AddCommand(StatusCmd)
