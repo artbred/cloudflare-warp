@@ -137,7 +137,8 @@ func rotate(cmd *cobra.Command, args []string) {
 
 	log.Infow("Starting rotation proxy",
 		zap.String("socks-addr", socksAddr.String()),
-		zap.Int("pool-size", opts.PoolSize))
+		zap.Int("pool-size", opts.PoolSize),
+		zap.Int("min-backends", opts.MinBackends))
 
 	// Create and run engine
 	engine := core.NewRotationEngine(ctx, opts)

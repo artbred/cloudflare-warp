@@ -426,16 +426,17 @@ func (r *RotationEngine) getNextBackend() *Backend {
 	return r.backends[0]
 }
 
-// hasMinimumBackends returns true if we have at least MinBackends healthy backends.
-func (r *RotationEngine) hasMinimumBackends() bool {
-	r.poolMu.RLock()
-	defer r.poolMu.RUnlock()
-
-	minRequired := r.opts.MinBackends
-	if minRequired < 1 {
-		minRequired = MinHealthyBackends // Use constant default
+// getEffectiveMinBackends returns the minimum required backends, defaulting to MinHealthyBackends constant.
+func (r *RotationEngine) getEffectiveMinBackends() int {
+	if r.opts.MinBackends < 1 {
+		return MinHealthyBackends
 	}
+	return r.opts.MinBackends
+}
 
+// hasMinimumBackendsLocked checks minimum backends without acquiring lock (caller must hold lock).
+func (r *RotationEngine) hasMinimumBackendsLocked() bool {
+	minRequired := r.getEffectiveMinBackends()
 	healthyCount := 0
 	for _, backend := range r.backends {
 		if backend.healthy.Load() {
@@ -446,6 +447,13 @@ func (r *RotationEngine) hasMinimumBackends() bool {
 		}
 	}
 	return false
+}
+
+// hasMinimumBackends returns true if we have at least MinBackends healthy backends.
+func (r *RotationEngine) hasMinimumBackends() bool {
+	r.poolMu.RLock()
+	defer r.poolMu.RUnlock()
+	return r.hasMinimumBackendsLocked()
 }
 
 // monitorBackends periodically checks backend health and replaces failed ones.
@@ -501,14 +509,10 @@ func (r *RotationEngine) checkAndReplaceUnhealthyBackends() {
 	r.backends = healthyBackends
 
 	// Warn if below minimum
-	minRequired := r.opts.MinBackends
-	if minRequired < 1 {
-		minRequired = MinHealthyBackends
-	}
-	if len(healthyBackends) < minRequired {
+	if !r.hasMinimumBackendsLocked() {
 		log.Errorw("CRITICAL: Below minimum healthy backends",
 			zap.Int("healthy", len(healthyBackends)),
-			zap.Int("minimum_required", minRequired))
+			zap.Int("minimum_required", r.getEffectiveMinBackends()))
 	}
 
 	// Try to replace failed backends
