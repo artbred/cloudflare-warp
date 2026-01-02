@@ -262,8 +262,8 @@ func (r *RotationEngine) startBackend(endpoint string, port int) (*Backend, erro
 		}
 	}()
 
-	// Wait for the backend SOCKS5 proxy to be ready (allow up to 8 seconds)
-	if err := waitForBackendReady(ctx, port, 8*time.Second); err != nil {
+	// Wait for the backend SOCKS5 proxy to be ready (allow up to 30 seconds for WireGuard tunnel)
+	if err := waitForBackendReady(ctx, port, 30*time.Second); err != nil {
 		cancel(err)
 		return nil, fmt.Errorf("backend failed to become ready: %w", err)
 	}
@@ -271,13 +271,15 @@ func (r *RotationEngine) startBackend(endpoint string, port int) (*Backend, erro
 	return backend, nil
 }
 
-// waitForBackendReady waits for the backend SOCKS5 proxy to be listening.
-// We just verify the SOCKS5 server responds to the greeting - the tunnel
-// may still be establishing but the proxy is ready to accept connections.
+// waitForBackendReady waits for the backend SOCKS5 proxy to be fully functional.
+// This tests actual connectivity through the tunnel, not just that SOCKS5 is listening.
 func waitForBackendReady(ctx context.Context, port int, timeout time.Duration) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	deadline := time.Now().Add(timeout)
+	startTime := time.Now()
 
+	var lastErr error
+	attempt := 0
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -285,42 +287,29 @@ func waitForBackendReady(ctx context.Context, port int, timeout time.Duration) e
 		default:
 		}
 
-		// Just check if SOCKS5 server is listening and responds to greeting
-		if err := testSocks5Listening(addr, 2*time.Second); err == nil {
-			return nil // SOCKS5 server is ready
+		attempt++
+		// Test full SOCKS5 connection to verify tunnel is routing traffic
+		if err := testSocks5Connection(addr, "1.1.1.1:443", 5*time.Second); err == nil {
+			elapsed := time.Since(startTime).Round(time.Millisecond)
+			log.Debugw("Backend tunnel established",
+				zap.Int("port", port),
+				zap.Duration("elapsed", elapsed),
+				zap.Int("attempts", attempt))
+			return nil // Backend is fully functional
+		} else {
+			lastErr = err
+			if attempt%5 == 0 { // Log every 5 attempts (~2.5s)
+				log.Debugw("Waiting for backend tunnel",
+					zap.Int("port", port),
+					zap.Duration("elapsed", time.Since(startTime).Round(time.Second)),
+					zap.Error(err))
+			}
 		}
 
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	return fmt.Errorf("timeout waiting for backend on port %d", port)
-}
-
-// testSocks5Listening verifies a SOCKS5 server is listening and responds to greeting.
-func testSocks5Listening(proxyAddr string, timeout time.Duration) error {
-	conn, err := net.DialTimeout("tcp", proxyAddr, timeout)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	conn.SetDeadline(time.Now().Add(timeout))
-
-	// SOCKS5 greeting: version 5, 1 auth method, no auth
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-		return err
-	}
-
-	// Read greeting response
-	resp := make([]byte, 2)
-	if _, err := io.ReadFull(conn, resp); err != nil {
-		return err
-	}
-	if resp[0] != 0x05 || resp[1] != 0x00 {
-		return fmt.Errorf("invalid SOCKS5 greeting response")
-	}
-
-	return nil
+	return fmt.Errorf("timeout waiting for backend on port %d: %v", port, lastErr)
 }
 
 // testSocks5Connection tests if a SOCKS5 proxy can actually route traffic.
