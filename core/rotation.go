@@ -78,8 +78,9 @@ func (r *RotationEngine) Run() error {
 		return fmt.Errorf("failed to initialize backends: %w", err)
 	}
 
-	if len(r.backends) < MinHealthyBackends {
-		return fmt.Errorf("not enough healthy backends: need at least %d, have %d", MinHealthyBackends, len(r.backends))
+	minRequired := r.getEffectiveMinBackends()
+	if len(r.backends) < minRequired {
+		return fmt.Errorf("not enough healthy backends: need at least %d, have %d", minRequired, len(r.backends))
 	}
 
 	log.Infow("Backend pool initialized", zap.Int("count", len(r.backends)))
@@ -222,14 +223,21 @@ func (r *RotationEngine) initializeBackends() error {
 		}
 	}
 
+	minRequired := r.getEffectiveMinBackends()
+
 	if len(r.backends) == 0 {
 		return errors.New("no backends started successfully - all endpoints failed")
+	}
+
+	if len(r.backends) < minRequired {
+		return fmt.Errorf("could not start minimum required backends: need %d, started %d", minRequired, len(r.backends))
 	}
 
 	if len(r.backends) < r.opts.PoolSize {
 		log.Warnw("Could not start requested number of backends",
 			zap.Int("requested", r.opts.PoolSize),
-			zap.Int("started", len(r.backends)))
+			zap.Int("started", len(r.backends)),
+			zap.Int("minimum_required", minRequired))
 	}
 
 	return nil
