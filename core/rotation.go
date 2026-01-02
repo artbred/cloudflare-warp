@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"golang.org/x/net/proxy"
 
 	"github.com/artbred/cloudflare-warp/cloudflare"
+	"github.com/artbred/cloudflare-warp/core/datadir"
 	"github.com/artbred/cloudflare-warp/log"
 )
 
@@ -27,6 +29,11 @@ const (
 	// MinHealthyBackends is the minimum number of healthy backends required to operate
 	MinHealthyBackends = 1
 )
+
+// getBackendIdentityDir returns the identity directory for a specific backend.
+func getBackendIdentityDir(port int) string {
+	return filepath.Join(datadir.GetDataDir(), fmt.Sprintf("backend-%d", port))
+}
 
 // RotationConfig holds the configuration for the rotation engine.
 type RotationConfig struct {
