@@ -122,3 +122,23 @@ func TestRotationEngine_MinimumBackendEnforcement(t *testing.T) {
 		t.Error("should not have minimum backends with only 1 healthy")
 	}
 }
+
+func TestBackend_ProactiveHealthCheck(t *testing.T) {
+	// Test that proactiveHealthCheck correctly identifies dead backends
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	backend := &Backend{
+		endpoint: "test",
+		port:     59999, // Non-existent port
+		ctx:      ctx,
+		cancel:   func(err error) { cancel() },
+		healthy:  atomic.NewBool(true),
+	}
+
+	// Check should fail since nothing is listening on port 59999
+	result := proactiveHealthCheck(backend, 500*time.Millisecond)
+	if result {
+		t.Error("health check should fail for non-listening port")
+	}
+}

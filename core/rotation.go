@@ -400,6 +400,19 @@ func testSocks5Connection(proxyAddr, targetAddr string, timeout time.Duration) e
 	return nil
 }
 
+// proactiveHealthCheck tests if a backend's SOCKS5 proxy is responsive.
+func proactiveHealthCheck(backend *Backend, timeout time.Duration) bool {
+	select {
+	case <-backend.ctx.Done():
+		return false
+	default:
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", backend.port)
+	err := testSocks5Connection(addr, "1.1.1.1:443", timeout)
+	return err == nil
+}
+
 // getNextBackend returns the next healthy backend using round-robin selection.
 func (r *RotationEngine) getNextBackend() *Backend {
 	r.poolMu.RLock()
@@ -466,9 +479,37 @@ func (r *RotationEngine) monitorBackends() {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
+			r.proactiveHealthChecks()
 			r.checkAndReplaceUnhealthyBackends()
 		}
 	}
+}
+
+// proactiveHealthChecks tests all backends and marks unresponsive ones as unhealthy.
+func (r *RotationEngine) proactiveHealthChecks() {
+	r.poolMu.RLock()
+	backends := make([]*Backend, len(r.backends))
+	copy(backends, r.backends)
+	r.poolMu.RUnlock()
+
+	var wg sync.WaitGroup
+	for _, backend := range backends {
+		if !backend.healthy.Load() {
+			continue // Already unhealthy
+		}
+
+		wg.Add(1)
+		go func(b *Backend) {
+			defer wg.Done()
+			if !proactiveHealthCheck(b, 5*time.Second) {
+				log.Warnw("Backend failed proactive health check",
+					zap.String("endpoint", b.endpoint),
+					zap.Int("port", b.port))
+				b.healthy.Store(false)
+			}
+		}(backend)
+	}
+	wg.Wait()
 }
 
 // checkAndReplaceUnhealthyBackends removes failed backends and attempts to replace them.
