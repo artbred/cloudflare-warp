@@ -20,12 +20,14 @@ import (
 
 var RotateCmd = &cobra.Command{
 	Use:   "rotate",
-	Short: "Run WARP proxy with IP rotation",
+	Short: "Run WARP proxy with IP rotation and continuous scanning",
 	Long: `Run the Cloudflare WARP proxy with IP rotation.
 This command starts a SOCKS5 proxy that rotates through multiple WARP endpoints,
 giving each new connection a different exit IP address.
 
-Scanning is always enabled to discover optimal endpoints on startup.`,
+The rotation pool is populated by continuous background scanning for working
+WARP endpoints. The scanner runs indefinitely, ensuring fresh endpoints are
+always available for rotation and replacement of failed backends.`,
 	Run: rotate,
 }
 

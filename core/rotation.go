@@ -112,6 +112,11 @@ func (r *RotationEngine) Stop() {
 	log.Info("Stopping rotation engine...")
 	r.cancel()
 
+	// Stop scanner
+	if r.scanner != nil {
+		r.scanner.Stop()
+	}
+
 	// Stop all backends
 	r.poolMu.Lock()
 	for _, backend := range r.backends {
@@ -647,26 +652,3 @@ func (r *RotationEngine) getNextEndpoint(timeout time.Duration) (string, error) 
 	}
 }
 
-// getScannerEndpoints runs the IP scanner to get fresh endpoints.
-func (r *RotationEngine) getScannerEndpoints() ([]string, error) {
-	ident, err := cloudflare.LoadOrCreateIdentity()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load identity: %w", err)
-	}
-
-	r.opts.Scan.PrivateKey = ident.PrivateKey
-	r.opts.Scan.PublicKey = ident.Config.Peers[0].PublicKey
-
-	res, err := RunScan(r.ctx, r.opts.Scan)
-	if err != nil {
-		return nil, err
-	}
-
-	endpoints := make([]string, len(res))
-	for i, ipInfo := range res {
-		endpoints[i] = ipInfo.AddrPort.String()
-	}
-
-	log.Infow("Scanner found endpoints", zap.Int("count", len(endpoints)))
-	return endpoints, nil
-}
