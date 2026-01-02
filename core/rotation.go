@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/shahradelahi/wiresocks"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/net/proxy"
 
 	"github.com/artbred/cloudflare-warp/cloudflare"
 	"github.com/artbred/cloudflare-warp/log"
@@ -35,7 +38,7 @@ type RotationConfig struct {
 	RotationInterval time.Duration // How often to rotate backends (default: 5 minutes)
 }
 
-// Backend represents a single wiresocks instance with its endpoint.
+// Backend represents a single wiresocks backend instance.
 type Backend struct {
 	endpoint  string
 	port      int
@@ -44,6 +47,7 @@ type Backend struct {
 	cancel    context.CancelCauseFunc
 	healthy   *atomic.Bool
 	startedAt time.Time
+	exitIP    netip.Addr
 }
 
 // RotationEngine manages a pool of wiresocks backends with round-robin selection.
@@ -133,6 +137,8 @@ func (r *RotationEngine) initializeBackends() error {
 		zap.String("endpoint", r.opts.Endpoint),
 		zap.Int("pool_size", r.opts.PoolSize))
 
+	usedIPs := make(map[netip.Addr]bool)
+
 	for i := 0; i < r.opts.PoolSize; i++ {
 		select {
 		case <-r.ctx.Done():
@@ -148,7 +154,7 @@ func (r *RotationEngine) initializeBackends() error {
 			zap.Int("index", i+1),
 			zap.Int("total", r.opts.PoolSize))
 
-		backend, err := r.startBackend(r.opts.Endpoint, port)
+		backend, err := r.startBackendWithUniqueIP(r.opts.Endpoint, port, usedIPs)
 		if err != nil {
 			log.Warnw("Failed to start backend",
 				zap.Int("port", port),
@@ -160,8 +166,14 @@ func (r *RotationEngine) initializeBackends() error {
 		r.backends = append(r.backends, backend)
 		r.poolMu.Unlock()
 
+		// Track this backend's IP for subsequent backends
+		if backend.exitIP.IsValid() {
+			usedIPs[backend.exitIP] = true
+		}
+
 		log.Infow("Backend started successfully",
 			zap.Int("port", backend.port),
+			zap.String("exit_ip", backend.exitIP.String()),
 			zap.Int("backends_ready", len(r.backends)))
 	}
 
@@ -242,6 +254,78 @@ func (r *RotationEngine) startBackend(endpoint string, port int) (*Backend, erro
 	if err := waitForBackendReady(ctx, port, 30*time.Second); err != nil {
 		cancel(err)
 		return nil, fmt.Errorf("backend failed to become ready: %w", err)
+	}
+
+	return backend, nil
+}
+
+// startBackendWithUniqueIP starts a backend and ensures it has a unique exit IP.
+// If the exit IP matches an existing backend, it waits 5 seconds and retries once.
+func (r *RotationEngine) startBackendWithUniqueIP(endpoint string, port int, usedIPs map[netip.Addr]bool) (*Backend, error) {
+	backend, err := r.startBackend(endpoint, port)
+	if err != nil {
+		return nil, err
+	}
+
+	// Query exit IP
+	proxyAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	exitIP, err := getExitIP(proxyAddr, 10*time.Second)
+	if err != nil {
+		log.Warnw("Failed to get exit IP for backend",
+			zap.Int("port", port),
+			zap.Error(err))
+		// Continue without IP tracking - backend is still usable
+		return backend, nil
+	}
+
+	backend.exitIP = exitIP
+	log.Infow("Backend exit IP detected",
+		zap.Int("port", port),
+		zap.String("exit_ip", exitIP.String()))
+
+	// Check if IP is unique
+	if !usedIPs[exitIP] {
+		return backend, nil
+	}
+
+	log.Warnw("Backend has duplicate exit IP, will retry",
+		zap.Int("port", port),
+		zap.String("exit_ip", exitIP.String()))
+
+	// Cancel current backend
+	backend.cancel(nil)
+
+	// Wait 5 seconds before retry
+	select {
+	case <-r.ctx.Done():
+		return nil, r.ctx.Err()
+	case <-time.After(5 * time.Second):
+	}
+
+	// Retry once
+	backend, err = r.startBackend(endpoint, port)
+	if err != nil {
+		return nil, fmt.Errorf("retry failed: %w", err)
+	}
+
+	// Query exit IP again
+	exitIP, err = getExitIP(proxyAddr, 10*time.Second)
+	if err != nil {
+		log.Warnw("Failed to get exit IP on retry",
+			zap.Int("port", port),
+			zap.Error(err))
+		return backend, nil
+	}
+
+	backend.exitIP = exitIP
+	log.Infow("Backend exit IP on retry",
+		zap.Int("port", port),
+		zap.String("exit_ip", exitIP.String()))
+
+	if usedIPs[exitIP] {
+		log.Warnw("Backend still has duplicate exit IP after retry, accepting anyway",
+			zap.Int("port", port),
+			zap.String("exit_ip", exitIP.String()))
 	}
 
 	return backend, nil
@@ -360,6 +444,49 @@ func testSocks5Connection(proxyAddr, targetAddr string, timeout time.Duration) e
 	return nil
 }
 
+// getExitIP queries the exit IP of a backend by making an HTTP request through its SOCKS5 proxy.
+func getExitIP(proxyAddr string, timeout time.Duration) (netip.Addr, error) {
+	dialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, proxy.Direct)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
+	}
+
+	transport := &http.Transport{
+		Dial: dialer.Dial,
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+
+	resp, err := client.Get("https://1.1.1.1/cdn-cgi/trace")
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to query exit IP: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Parse response - format is key=value lines, we want ip=x.x.x.x
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, "ip=") {
+			ipStr := strings.TrimPrefix(line, "ip=")
+			ipStr = strings.TrimSpace(ipStr)
+			addr, err := netip.ParseAddr(ipStr)
+			if err != nil {
+				return netip.Addr{}, fmt.Errorf("failed to parse IP %q: %w", ipStr, err)
+			}
+			return addr, nil
+		}
+	}
+
+	return netip.Addr{}, errors.New("no IP found in response")
+}
+
 // proactiveHealthCheck tests if a backend's SOCKS5 proxy is responsive.
 func proactiveHealthCheck(backend *Backend, timeout time.Duration) bool {
 	select {
@@ -391,6 +518,9 @@ func (r *RotationEngine) getNextBackend() *Backend {
 		backend := r.backends[index]
 
 		if backend.healthy.Load() {
+			log.Debugw("Selected backend for connection",
+				zap.Int("port", backend.port),
+				zap.String("exit_ip", backend.exitIP.String()))
 			return backend
 		}
 	}
@@ -427,6 +557,18 @@ func (r *RotationEngine) hasMinimumBackends() bool {
 	r.poolMu.RLock()
 	defer r.poolMu.RUnlock()
 	return r.hasMinimumBackendsLocked()
+}
+
+// getUsedExitIPs returns a set of exit IPs currently in use by backends.
+// Caller must hold poolMu read lock.
+func (r *RotationEngine) getUsedExitIPs() map[netip.Addr]bool {
+	usedIPs := make(map[netip.Addr]bool)
+	for _, b := range r.backends {
+		if b.exitIP.IsValid() {
+			usedIPs[b.exitIP] = true
+		}
+	}
+	return usedIPs
 }
 
 // monitorBackends periodically checks backend health and replaces failed ones.
@@ -556,14 +698,21 @@ func (r *RotationEngine) rotateOneBackend(index int) {
 
 	oldBackend := r.backends[index]
 	port := oldBackend.port
+	usedIPs := r.getUsedExitIPs()
+	// Remove the old backend's IP from used set since we're replacing it
+	delete(usedIPs, oldBackend.exitIP)
 	r.poolMu.Unlock()
 
 	log.Infow("Rotating backend",
 		zap.Int("index", index),
-		zap.Int("port", port))
+		zap.Int("port", port),
+		zap.String("old_exit_ip", oldBackend.exitIP.String()))
 
-	// Start new backend first (use different port temporarily)
-	newBackend, err := r.startBackend(r.opts.Endpoint, port+100)
+	// Use a different port temporarily for the new backend
+	tempPort := port + 100
+
+	// Start new backend with unique IP check
+	newBackend, err := r.startBackendWithUniqueIP(r.opts.Endpoint, tempPort, usedIPs)
 	if err != nil {
 		log.Warnw("Failed to start replacement backend during rotation",
 			zap.Int("index", index),
@@ -574,13 +723,16 @@ func (r *RotationEngine) rotateOneBackend(index int) {
 	// Swap backends
 	r.poolMu.Lock()
 	if index < len(r.backends) {
+		// Cancel old backend
 		oldBackend.cancel(nil)
+		// Replace with new backend
 		r.backends[index] = newBackend
 	}
 	r.poolMu.Unlock()
 
 	log.Infow("Backend rotated successfully",
 		zap.Int("index", index),
-		zap.Int("port", newBackend.port))
+		zap.Int("port", newBackend.port),
+		zap.String("new_exit_ip", newBackend.exitIP.String()))
 }
 
