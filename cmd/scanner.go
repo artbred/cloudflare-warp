@@ -44,7 +44,7 @@ func runScanner(cmd *cobra.Command, args []string) {
 	v6, _ := cmd.Flags().GetBool("ipv6")
 	rtt, _ := cmd.Flags().GetDuration("rtt")
 
-	identity, err := cloudflare.LoadIdentity()
+	identity, err := cloudflare.LoadIdentity("")
 	if err != nil {
 		fatal(fmt.Errorf("failed to load identity: %w", err))
 	}

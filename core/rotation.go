@@ -198,11 +198,18 @@ func (r *RotationEngine) initializeBackends() error {
 
 // startBackend creates and starts a single wiresocks backend instance.
 func (r *RotationEngine) startBackend(endpoint string, port int) (*Backend, error) {
-	// Load identity
-	ident, err := cloudflare.LoadOrCreateIdentity()
+	// Create unique identity directory for this backend
+	identityDir := getBackendIdentityDir(port)
+
+	// Load or create identity specific to this backend
+	ident, err := cloudflare.LoadOrCreateIdentity(identityDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load identity: %w", err)
+		return nil, fmt.Errorf("failed to load identity for backend %d: %w", port, err)
 	}
+
+	log.Infow("Using identity for backend",
+		zap.Int("port", port),
+		zap.String("identity_dir", identityDir))
 
 	// Generate WireGuard config
 	conf := GenerateWireguardConfig(ident)

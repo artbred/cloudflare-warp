@@ -81,8 +81,8 @@ func (e *Engine) Run() error {
 }
 
 func (e *Engine) getScannerEndpoints() ([]string, error) {
-	// make primary identity
-	ident, err := cloudflare.LoadOrCreateIdentity()
+	// make primary identity (use default data directory)
+	ident, err := cloudflare.LoadOrCreateIdentity("")
 	if err != nil {
 		log.Errorw("Failed to load/create primary identity", zap.Error(err))
 		return nil, err
@@ -118,8 +118,8 @@ func (e *Engine) Stop() {
 }
 
 func (e *Engine) runWarp(endpoint string) error {
-	// make primary identity
-	ident, err := cloudflare.LoadOrCreateIdentity()
+	// make primary identity (use default data directory)
+	ident, err := cloudflare.LoadOrCreateIdentity("")
 	if err != nil {
 		log.Errorw("Failed to load primary identity", zap.Error(err))
 		return err

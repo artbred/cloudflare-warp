@@ -41,7 +41,7 @@ func runUpdate() error {
 		return fmt.Errorf("at least one of --name or --license must be provided")
 	}
 
-	identity, err := cloudflare.LoadIdentity()
+	identity, err := cloudflare.LoadIdentity("")
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, errors.New("identity contains 0 peers")) {
 			return fmt.Errorf("WARP identity not found. Please run 'warp generate' to create one")
@@ -64,8 +64,8 @@ func runUpdate() error {
 
 	// Update license if provided
 	if license != "" {
-		// Generate configs
-		identity, err = cloudflare.CreateOrUpdateIdentity(license)
+		// Generate configs (use default data directory)
+		identity, err = cloudflare.CreateOrUpdateIdentity("", license)
 		if err != nil {
 			log.Fatalw("Failed to generate primary identity", zap.Error(err))
 		}
