@@ -5,7 +5,7 @@ import (
 
 	"github.com/shahradelahi/wiresocks"
 
-	"github.com/shahradelahi/cloudflare-warp/cloudflare/model"
+	"github.com/artbred/cloudflare-warp/cloudflare/model"
 )
 
 func GenerateWireguardConfig(i *model.Identity) wiresocks.Configuration {

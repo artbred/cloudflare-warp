@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/shahradelahi/cloudflare-warp/core/cache"
+	"github.com/artbred/cloudflare-warp/core/cache"
 )
 
 type EndpointEventHandler interface {

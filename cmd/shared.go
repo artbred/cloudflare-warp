@@ -6,7 +6,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/shahradelahi/cloudflare-warp/cloudflare/model"
+	"github.com/artbred/cloudflare-warp/cloudflare/model"
 )
 
 func FormatMessage(shortMessage string, longMessage string) string {

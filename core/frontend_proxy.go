@@ -11,7 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/shahradelahi/cloudflare-warp/log"
+	"github.com/artbred/cloudflare-warp/log"
 )
 
 const (

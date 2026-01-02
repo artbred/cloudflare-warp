@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/netip"
 
-	"github.com/shahradelahi/cloudflare-warp/ipscanner/model"
+	"github.com/artbred/cloudflare-warp/ipscanner/model"
 )
 
 type Ping struct {

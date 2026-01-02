@@ -14,10 +14,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/shahradelahi/cloudflare-warp/cloudflare"
-	"github.com/shahradelahi/cloudflare-warp/cloudflare/network"
-	"github.com/shahradelahi/cloudflare-warp/ipscanner"
-	"github.com/shahradelahi/cloudflare-warp/log"
+	"github.com/artbred/cloudflare-warp/cloudflare"
+	"github.com/artbred/cloudflare-warp/cloudflare/network"
+	"github.com/artbred/cloudflare-warp/ipscanner"
+	"github.com/artbred/cloudflare-warp/log"
 )
 
 var ScannerCmd = &cobra.Command{

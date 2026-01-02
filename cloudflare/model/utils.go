@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/shahradelahi/cloudflare-warp/core/datadir"
+	"github.com/artbred/cloudflare-warp/core/datadir"
 )
 
 func GetRegPath() string {

@@ -14,9 +14,9 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
-	"github.com/shahradelahi/cloudflare-warp/cloudflare"
-	"github.com/shahradelahi/cloudflare-warp/core/cache"
-	"github.com/shahradelahi/cloudflare-warp/log"
+	"github.com/artbred/cloudflare-warp/cloudflare"
+	"github.com/artbred/cloudflare-warp/core/cache"
+	"github.com/artbred/cloudflare-warp/log"
 )
 
 const (

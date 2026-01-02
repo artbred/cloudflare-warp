@@ -8,10 +8,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/shahradelahi/cloudflare-warp/core/cache"
-	"github.com/shahradelahi/cloudflare-warp/core/datadir"
-	"github.com/shahradelahi/cloudflare-warp/internal/version"
-	"github.com/shahradelahi/cloudflare-warp/log"
+	"github.com/artbred/cloudflare-warp/core/cache"
+	"github.com/artbred/cloudflare-warp/core/datadir"
+	"github.com/artbred/cloudflare-warp/internal/version"
+	"github.com/artbred/cloudflare-warp/log"
 )
 
 var rootCmd = &cobra.Command{

@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/shahradelahi/cloudflare-warp/cloudflare/model"
-	"github.com/shahradelahi/cloudflare-warp/core/datadir"
+	"github.com/artbred/cloudflare-warp/cloudflare/model"
+	"github.com/artbred/cloudflare-warp/core/datadir"
 )
 
 func TestLoadOrCreateIdentity(t *testing.T) {

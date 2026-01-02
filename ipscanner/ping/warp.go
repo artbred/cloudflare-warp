@@ -18,10 +18,10 @@ import (
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/curve25519"
 
-	"github.com/shahradelahi/cloudflare-warp/cloudflare/network"
-	"github.com/shahradelahi/cloudflare-warp/ipscanner/model"
-	"github.com/shahradelahi/cloudflare-warp/log"
-	"github.com/shahradelahi/cloudflare-warp/utils"
+	"github.com/artbred/cloudflare-warp/cloudflare/network"
+	"github.com/artbred/cloudflare-warp/ipscanner/model"
+	"github.com/artbred/cloudflare-warp/log"
+	"github.com/artbred/cloudflare-warp/utils"
 )
 
 const (

@@ -5,7 +5,7 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/shahradelahi/cloudflare-warp/utils"
+	"github.com/artbred/cloudflare-warp/utils"
 )
 
 func ScannerPrefixes() []netip.Prefix {

@@ -9,8 +9,8 @@ import (
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
-	"github.com/shahradelahi/cloudflare-warp/cloudflare"
-	"github.com/shahradelahi/cloudflare-warp/log"
+	"github.com/artbred/cloudflare-warp/cloudflare"
+	"github.com/artbred/cloudflare-warp/log"
 )
 
 var updateShortMsg = "Updates the Cloudflare Warp device configuration"

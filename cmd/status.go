@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/shahradelahi/cloudflare-warp/cloudflare"
+	"github.com/artbred/cloudflare-warp/cloudflare"
 )
 
 var statusShortMsg = "Prints the status of the current Cloudflare Warp device"

@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/shahradelahi/cloudflare-warp/core/datadir"
+	"github.com/artbred/cloudflare-warp/core/datadir"
 )
 
 func setupTestCache(t *testing.T) (*Cache, func()) {

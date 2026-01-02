@@ -14,9 +14,9 @@ import (
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
-	"github.com/shahradelahi/cloudflare-warp/core"
-	"github.com/shahradelahi/cloudflare-warp/core/cache"
-	"github.com/shahradelahi/cloudflare-warp/log"
+	"github.com/artbred/cloudflare-warp/core"
+	"github.com/artbred/cloudflare-warp/core/cache"
+	"github.com/artbred/cloudflare-warp/log"
 )
 
 var RotateCmd = &cobra.Command{
@@ -36,7 +36,7 @@ func init() {
 	RotateCmd.Flags().Int("pool-size", 10, "Number of endpoints in the rotation pool (default: 10).")
 	RotateCmd.Flags().Int("min-backends", 1, "Minimum healthy backends required to operate (default: 1).")
 	RotateCmd.Flags().String("dns", "1.1.1.1", "DNS server address to use.")
-	RotateCmd.Flags().Bool("scan", false, "Scan for endpoints on startup if cache is insufficient.")
+	RotateCmd.Flags().Bool("scan", true, "Scan for endpoints on startup if cache is insufficient.")
 	RotateCmd.Flags().Duration("scan-rtt", 1000*time.Millisecond, "Scanner RTT limit for endpoint selection (e.g., 1000ms).")
 	RotateCmd.Flags().Bool("4", false, "Use IPv4 for endpoint selection (scanner mode).")
 	RotateCmd.Flags().Bool("6", false, "Use IPv6 for endpoint selection (scanner mode).")

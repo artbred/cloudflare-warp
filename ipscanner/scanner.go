@@ -8,10 +8,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/shahradelahi/cloudflare-warp/core/cache"
-	"github.com/shahradelahi/cloudflare-warp/ipscanner/engine"
-	"github.com/shahradelahi/cloudflare-warp/ipscanner/model"
-	"github.com/shahradelahi/cloudflare-warp/log"
+	"github.com/artbred/cloudflare-warp/core/cache"
+	"github.com/artbred/cloudflare-warp/ipscanner/engine"
+	"github.com/artbred/cloudflare-warp/ipscanner/model"
+	"github.com/artbred/cloudflare-warp/log"
 )
 
 type IPScanner struct {
