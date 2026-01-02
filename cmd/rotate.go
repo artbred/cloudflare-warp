@@ -34,6 +34,7 @@ Alternatively, use --scan to discover endpoints on startup.`,
 func init() {
 	RotateCmd.Flags().String("socks-addr", "", "Socks5 proxy bind address (required, e.g., 127.0.0.1:1080).")
 	RotateCmd.Flags().Int("pool-size", 10, "Number of endpoints in the rotation pool (default: 10).")
+	RotateCmd.Flags().Int("min-backends", 1, "Minimum healthy backends required to operate (default: 1).")
 	RotateCmd.Flags().String("dns", "1.1.1.1", "DNS server address to use.")
 	RotateCmd.Flags().Bool("scan", false, "Scan for endpoints on startup if cache is insufficient.")
 	RotateCmd.Flags().Duration("scan-rtt", 1000*time.Millisecond, "Scanner RTT limit for endpoint selection (e.g., 1000ms).")
@@ -42,6 +43,7 @@ func init() {
 
 	viper.BindPFlag("rotate-socks-addr", RotateCmd.Flags().Lookup("socks-addr"))
 	viper.BindPFlag("rotate-pool-size", RotateCmd.Flags().Lookup("pool-size"))
+	viper.BindPFlag("rotate-min-backends", RotateCmd.Flags().Lookup("min-backends"))
 	viper.BindPFlag("rotate-dns", RotateCmd.Flags().Lookup("dns"))
 	viper.BindPFlag("rotate-scan", RotateCmd.Flags().Lookup("scan"))
 	viper.BindPFlag("rotate-scan-rtt", RotateCmd.Flags().Lookup("scan-rtt"))
@@ -74,6 +76,14 @@ func rotate(cmd *cobra.Command, args []string) {
 		rotateFatal(errors.New("pool-size cannot exceed 50"))
 	}
 
+	minBackends := viper.GetInt("rotate-min-backends")
+	if minBackends < 1 {
+		rotateFatal(errors.New("min-backends must be at least 1"))
+	}
+	if minBackends > poolSize {
+		rotateFatal(errors.New("min-backends cannot exceed pool-size"))
+	}
+
 	dnsAddr, err := netip.ParseAddr(viper.GetString("rotate-dns"))
 	if err != nil {
 		rotateFatal(fmt.Errorf("invalid dns address: %w", err))
@@ -91,6 +101,7 @@ func rotate(cmd *cobra.Command, args []string) {
 	opts := core.RotationConfig{
 		FrontendAddr: &socksAddr,
 		PoolSize:     poolSize,
+		MinBackends:  minBackends,
 		DnsAddr:      dnsAddr,
 	}
 

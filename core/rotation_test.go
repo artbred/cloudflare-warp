@@ -83,3 +83,42 @@ func TestGetNextBackend_ConcurrentShrink(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestRotationEngine_MinimumBackendEnforcement(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	addr := netip.MustParseAddrPort("127.0.0.1:1080")
+	r := &RotationEngine{
+		ctx:       ctx,
+		cancel:    cancel,
+		opts:      RotationConfig{FrontendAddr: &addr, PoolSize: 5, MinBackends: 2},
+		backends:  make([]*Backend, 0),
+		nextIndex: atomic.NewUint32(0),
+	}
+
+	// Add 2 backends (exactly at minimum)
+	for i := 0; i < 2; i++ {
+		bCtx, bCancel := context.WithCancelCause(ctx)
+		r.backends = append(r.backends, &Backend{
+			endpoint: "test",
+			port:     40000 + i,
+			ctx:      bCtx,
+			cancel:   bCancel,
+			healthy:  atomic.NewBool(true),
+		})
+	}
+
+	// Check should pass with 2 backends
+	if !r.hasMinimumBackends() {
+		t.Error("should have minimum backends with 2")
+	}
+
+	// Mark one as unhealthy
+	r.backends[0].healthy.Store(false)
+
+	// Check should fail with 1 healthy backend
+	if r.hasMinimumBackends() {
+		t.Error("should not have minimum backends with only 1 healthy")
+	}
+}

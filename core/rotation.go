@@ -30,6 +30,7 @@ const (
 type RotationConfig struct {
 	FrontendAddr *netip.AddrPort
 	PoolSize     int
+	MinBackends  int // Minimum healthy backends required (default: 1)
 	DnsAddr      netip.Addr
 	Scan         *ScanOptions
 }
@@ -425,6 +426,28 @@ func (r *RotationEngine) getNextBackend() *Backend {
 	return r.backends[0]
 }
 
+// hasMinimumBackends returns true if we have at least MinBackends healthy backends.
+func (r *RotationEngine) hasMinimumBackends() bool {
+	r.poolMu.RLock()
+	defer r.poolMu.RUnlock()
+
+	minRequired := r.opts.MinBackends
+	if minRequired < 1 {
+		minRequired = MinHealthyBackends // Use constant default
+	}
+
+	healthyCount := 0
+	for _, backend := range r.backends {
+		if backend.healthy.Load() {
+			healthyCount++
+			if healthyCount >= minRequired {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // monitorBackends periodically checks backend health and replaces failed ones.
 func (r *RotationEngine) monitorBackends() {
 	ticker := time.NewTicker(10 * time.Second)
@@ -476,6 +499,17 @@ func (r *RotationEngine) checkAndReplaceUnhealthyBackends() {
 	}
 
 	r.backends = healthyBackends
+
+	// Warn if below minimum
+	minRequired := r.opts.MinBackends
+	if minRequired < 1 {
+		minRequired = MinHealthyBackends
+	}
+	if len(healthyBackends) < minRequired {
+		log.Errorw("CRITICAL: Below minimum healthy backends",
+			zap.Int("healthy", len(healthyBackends)),
+			zap.Int("minimum_required", minRequired))
+	}
 
 	// Try to replace failed backends
 	if len(availablePorts) > 0 {
