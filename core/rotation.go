@@ -616,6 +616,14 @@ func (r *RotationEngine) feedEndpointsFromScanner() {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
+			// Periodic cleanup to prevent unbounded memory growth
+			r.usedEndpointsMu.Lock()
+			if len(r.usedEndpoints) > 10000 {
+				r.usedEndpoints = make(map[string]bool)
+				log.Debug("Reset usedEndpoints tracking to prevent memory growth")
+			}
+			r.usedEndpointsMu.Unlock()
+
 			ips := r.scanner.GetAvailableIPs()
 			for _, ip := range ips {
 				endpoint := ip.AddrPort.String()
