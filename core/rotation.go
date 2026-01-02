@@ -51,7 +51,6 @@ type RotationEngine struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	opts      RotationConfig
-	cache     *cache.Cache
 	backends  []*Backend
 	nextIndex *atomic.Uint32
 	poolMu    sync.RWMutex
@@ -65,7 +64,6 @@ func NewRotationEngine(ctx context.Context, opts RotationConfig) *RotationEngine
 		ctx:       ctx,
 		cancel:    cancel,
 		opts:      opts,
-		cache:     cache.NewCache(),
 		backends:  make([]*Backend, 0, opts.PoolSize),
 		nextIndex: atomic.NewUint32(0),
 	}
