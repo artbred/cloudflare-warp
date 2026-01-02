@@ -15,7 +15,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/artbred/cloudflare-warp/cloudflare"
+	"github.com/artbred/cloudflare-warp/cloudflare/network"
 	"github.com/artbred/cloudflare-warp/core/cache"
+	"github.com/artbred/cloudflare-warp/ipscanner"
 	"github.com/artbred/cloudflare-warp/log"
 )
 
@@ -55,17 +57,25 @@ type RotationEngine struct {
 	nextIndex *atomic.Uint32
 	poolMu    sync.RWMutex
 	frontend  *FrontendProxy
+
+	// Scanner for continuous endpoint discovery
+	scanner         *ipscanner.IPScanner
+	endpointChan    chan string
+	usedEndpoints   map[string]bool
+	usedEndpointsMu sync.Mutex
 }
 
 // NewRotationEngine creates a new rotation engine.
 func NewRotationEngine(ctx context.Context, opts RotationConfig) *RotationEngine {
 	ctx, cancel := context.WithCancel(ctx)
 	return &RotationEngine{
-		ctx:       ctx,
-		cancel:    cancel,
-		opts:      opts,
-		backends:  make([]*Backend, 0, opts.PoolSize),
-		nextIndex: atomic.NewUint32(0),
+		ctx:           ctx,
+		cancel:        cancel,
+		opts:          opts,
+		backends:      make([]*Backend, 0, opts.PoolSize),
+		nextIndex:     atomic.NewUint32(0),
+		endpointChan:  make(chan string, 100),
+		usedEndpoints: make(map[string]bool),
 	}
 }
 
@@ -607,6 +617,84 @@ func (r *RotationEngine) replaceBackends(ports []int, failedEndpoints []string) 
 		log.Infow("Replacement backend started",
 			zap.String("endpoint", backend.endpoint),
 			zap.Int("port", backend.port))
+	}
+}
+
+// startBackgroundScanner starts a persistent scanner that feeds endpoints to the channel.
+func (r *RotationEngine) startBackgroundScanner() error {
+	ident, err := cloudflare.LoadOrCreateIdentity()
+	if err != nil {
+		return fmt.Errorf("failed to load identity: %w", err)
+	}
+
+	r.scanner = ipscanner.NewScanner(
+		ipscanner.WithContext(r.ctx),
+		ipscanner.WithWarpPrivateKey(ident.PrivateKey),
+		ipscanner.WithWarpPeerPublicKey(ident.Config.Peers[0].PublicKey),
+		ipscanner.WithUseIPv4(r.opts.Scan.V4),
+		ipscanner.WithUseIPv6(r.opts.Scan.V6),
+		ipscanner.WithMaxDesirableRTT(r.opts.Scan.MaxRTT),
+		ipscanner.WithCidrList(network.ScannerPrefixes()),
+		ipscanner.WithIPQueueSize(r.opts.PoolSize * 3),
+	)
+
+	// Start scanner in background
+	go func() {
+		if err := r.scanner.Run(); err != nil {
+			log.Errorw("Background scanner failed", zap.Error(err))
+		}
+	}()
+
+	// Feed discovered endpoints to channel
+	go r.feedEndpointsFromScanner()
+
+	log.Info("Background scanner started")
+	return nil
+}
+
+// feedEndpointsFromScanner continuously reads from scanner and feeds unique endpoints to channel.
+func (r *RotationEngine) feedEndpointsFromScanner() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			ips := r.scanner.GetAvailableIPs()
+			for _, ip := range ips {
+				endpoint := ip.AddrPort.String()
+
+				r.usedEndpointsMu.Lock()
+				if !r.usedEndpoints[endpoint] {
+					r.usedEndpoints[endpoint] = true
+					r.usedEndpointsMu.Unlock()
+
+					select {
+					case r.endpointChan <- endpoint:
+						log.Debugw("New endpoint discovered", zap.String("endpoint", endpoint))
+					default:
+						// Channel full, skip
+					}
+				} else {
+					r.usedEndpointsMu.Unlock()
+				}
+			}
+		}
+	}
+}
+
+// getNextEndpoint gets the next available endpoint from the scanner.
+// Blocks until an endpoint is available or context is cancelled.
+func (r *RotationEngine) getNextEndpoint(timeout time.Duration) (string, error) {
+	select {
+	case <-r.ctx.Done():
+		return "", r.ctx.Err()
+	case endpoint := <-r.endpointChan:
+		return endpoint, nil
+	case <-time.After(timeout):
+		return "", errors.New("timeout waiting for endpoint from scanner")
 	}
 }
 
