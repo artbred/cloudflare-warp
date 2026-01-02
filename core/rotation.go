@@ -32,7 +32,7 @@ type RotationConfig struct {
 	PoolSize     int
 	MinBackends  int // Minimum healthy backends required (default: 1)
 	DnsAddr      netip.Addr
-	Scan         *ScanOptions
+	Scan         ScanOptions // No longer optional - scanning is always enabled
 }
 
 // Backend represents a single wiresocks instance with its endpoint.
@@ -125,20 +125,12 @@ func (r *RotationEngine) initializeBackends() error {
 
 	endpoints, err := r.cache.GetDistinctRandomEndpoints(endpointsToTry)
 	if err != nil {
-		if r.opts.Scan != nil {
-			log.Infow("Cache has insufficient endpoints, running scanner...")
-			scannedEndpoints, scanErr := r.getScannerEndpoints()
-			if scanErr != nil {
-				return fmt.Errorf("failed to get endpoints from scan: %w", scanErr)
-			}
-			endpoints = scannedEndpoints
-		} else {
-			// Try with whatever we have
-			endpoints, _ = r.cache.GetDistinctRandomEndpoints(r.opts.PoolSize)
-			if len(endpoints) == 0 {
-				return fmt.Errorf("not enough cached endpoints (enable --scan to discover more): %w", err)
-			}
+		log.Infow("Cache has insufficient endpoints, running scanner...")
+		scannedEndpoints, scanErr := r.getScannerEndpoints()
+		if scanErr != nil {
+			return fmt.Errorf("failed to get endpoints from scan: %w", scanErr)
 		}
+		endpoints = scannedEndpoints
 	}
 
 	log.Infow("Initializing backend pool",
@@ -628,7 +620,7 @@ func (r *RotationEngine) getScannerEndpoints() ([]string, error) {
 	r.opts.Scan.PrivateKey = ident.PrivateKey
 	r.opts.Scan.PublicKey = ident.Config.Peers[0].PublicKey
 
-	res, err := RunScan(r.ctx, *r.opts.Scan)
+	res, err := RunScan(r.ctx, r.opts.Scan)
 	if err != nil {
 		return nil, err
 	}

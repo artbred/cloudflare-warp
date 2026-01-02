@@ -15,7 +15,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/artbred/cloudflare-warp/core"
-	"github.com/artbred/cloudflare-warp/core/cache"
 	"github.com/artbred/cloudflare-warp/log"
 )
 
@@ -26,8 +25,7 @@ var RotateCmd = &cobra.Command{
 This command starts a SOCKS5 proxy that rotates through multiple WARP endpoints,
 giving each new connection a different exit IP address.
 
-The rotation pool is populated from cached endpoints (run 'warp scanner' first to populate the cache).
-Alternatively, use --scan to discover endpoints on startup.`,
+Scanning is always enabled to discover optimal endpoints on startup.`,
 	Run: rotate,
 }
 
@@ -36,7 +34,6 @@ func init() {
 	RotateCmd.Flags().Int("pool-size", 10, "Number of endpoints in the rotation pool (default: 10).")
 	RotateCmd.Flags().Int("min-backends", 1, "Minimum healthy backends required to operate (default: 1).")
 	RotateCmd.Flags().String("dns", "1.1.1.1", "DNS server address to use.")
-	RotateCmd.Flags().Bool("scan", true, "Scan for endpoints on startup if cache is insufficient.")
 	RotateCmd.Flags().Duration("scan-rtt", 1000*time.Millisecond, "Scanner RTT limit for endpoint selection (e.g., 1000ms).")
 	RotateCmd.Flags().Bool("4", false, "Use IPv4 for endpoint selection (scanner mode).")
 	RotateCmd.Flags().Bool("6", false, "Use IPv6 for endpoint selection (scanner mode).")
@@ -45,7 +42,6 @@ func init() {
 	viper.BindPFlag("rotate-pool-size", RotateCmd.Flags().Lookup("pool-size"))
 	viper.BindPFlag("rotate-min-backends", RotateCmd.Flags().Lookup("min-backends"))
 	viper.BindPFlag("rotate-dns", RotateCmd.Flags().Lookup("dns"))
-	viper.BindPFlag("rotate-scan", RotateCmd.Flags().Lookup("scan"))
 	viper.BindPFlag("rotate-scan-rtt", RotateCmd.Flags().Lookup("scan-rtt"))
 	viper.BindPFlag("rotate-4", RotateCmd.Flags().Lookup("4"))
 	viper.BindPFlag("rotate-6", RotateCmd.Flags().Lookup("6"))
@@ -97,45 +93,20 @@ func rotate(cmd *cobra.Command, args []string) {
 		useV4, useV6 = true, true
 	}
 
-	// Build config
+	// Build config - scanning is always enabled
 	opts := core.RotationConfig{
 		FrontendAddr: &socksAddr,
 		PoolSize:     poolSize,
 		MinBackends:  minBackends,
 		DnsAddr:      dnsAddr,
+		Scan: core.ScanOptions{
+			V4:     useV4,
+			V6:     useV6,
+			MaxRTT: viper.GetDuration("rotate-scan-rtt"),
+		},
 	}
 
-	// Check cache for available endpoints
-	c := cache.NewCache()
-	availableEndpoints := c.GetAllEndpoints()
-
-	if len(availableEndpoints) < poolSize {
-		if viper.GetBool("rotate-scan") {
-			log.Infow("Cache has insufficient endpoints, scanner mode enabled",
-				zap.Int("available", len(availableEndpoints)),
-				zap.Int("needed", poolSize))
-			opts.Scan = &core.ScanOptions{
-				V4:     useV4,
-				V6:     useV6,
-				MaxRTT: viper.GetDuration("rotate-scan-rtt"),
-			}
-		} else {
-			log.Warnw("Cache has insufficient endpoints for requested pool size",
-				zap.Int("available", len(availableEndpoints)),
-				zap.Int("needed", poolSize))
-			log.Info("Run 'warp scanner' first to populate the cache, or use --scan flag")
-
-			if len(availableEndpoints) == 0 {
-				rotateFatal(errors.New("no cached endpoints available; run 'warp scanner' first or use --scan"))
-			}
-
-			// Adjust pool size to available endpoints
-			opts.PoolSize = len(availableEndpoints)
-			log.Infow("Adjusted pool size to available endpoints", zap.Int("pool-size", opts.PoolSize))
-		}
-	}
-
-	log.Infow("Starting rotation proxy",
+	log.Infow("Starting rotation proxy with continuous scanning",
 		zap.String("socks-addr", socksAddr.String()),
 		zap.Int("pool-size", opts.PoolSize),
 		zap.Int("min-backends", opts.MinBackends))
