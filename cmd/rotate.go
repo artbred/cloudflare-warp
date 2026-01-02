@@ -20,33 +20,30 @@ import (
 
 var RotateCmd = &cobra.Command{
 	Use:   "rotate",
-	Short: "Run WARP proxy with IP rotation and continuous scanning",
+	Short: "Run WARP proxy with IP rotation",
 	Long: `Run the Cloudflare WARP proxy with IP rotation.
-This command starts a SOCKS5 proxy that rotates through multiple WARP endpoints,
+This command starts a SOCKS5 proxy that rotates through multiple WARP backends,
 giving each new connection a different exit IP address.
 
-The rotation pool is populated by continuous background scanning for working
-WARP endpoints. The scanner runs indefinitely, ensuring fresh endpoints are
-always available for rotation and replacement of failed backends.`,
+Backends connect to engage.cloudflareclient.com:2408 and are periodically
+rotated in the background to refresh connections.`,
 	Run: rotate,
 }
 
 func init() {
 	RotateCmd.Flags().String("socks-addr", "", "Socks5 proxy bind address (required, e.g., 127.0.0.1:1080).")
-	RotateCmd.Flags().Int("pool-size", 10, "Number of endpoints in the rotation pool (default: 10).")
+	RotateCmd.Flags().Int("pool-size", 10, "Number of backends in the rotation pool (default: 10).")
 	RotateCmd.Flags().Int("min-backends", 1, "Minimum healthy backends required to operate (default: 1).")
 	RotateCmd.Flags().String("dns", "1.1.1.1", "DNS server address to use.")
-	RotateCmd.Flags().Duration("scan-rtt", 1000*time.Millisecond, "Scanner RTT limit for endpoint selection (e.g., 1000ms).")
-	RotateCmd.Flags().Bool("4", false, "Use IPv4 for endpoint selection (scanner mode).")
-	RotateCmd.Flags().Bool("6", false, "Use IPv6 for endpoint selection (scanner mode).")
+	RotateCmd.Flags().String("endpoint", "", "WARP endpoint (default: engage.cloudflareclient.com:2408).")
+	RotateCmd.Flags().Duration("rotation-interval", 5*time.Minute, "How often to rotate backends (default: 5m).")
 
 	viper.BindPFlag("rotate-socks-addr", RotateCmd.Flags().Lookup("socks-addr"))
 	viper.BindPFlag("rotate-pool-size", RotateCmd.Flags().Lookup("pool-size"))
 	viper.BindPFlag("rotate-min-backends", RotateCmd.Flags().Lookup("min-backends"))
 	viper.BindPFlag("rotate-dns", RotateCmd.Flags().Lookup("dns"))
-	viper.BindPFlag("rotate-scan-rtt", RotateCmd.Flags().Lookup("scan-rtt"))
-	viper.BindPFlag("rotate-4", RotateCmd.Flags().Lookup("4"))
-	viper.BindPFlag("rotate-6", RotateCmd.Flags().Lookup("6"))
+	viper.BindPFlag("rotate-endpoint", RotateCmd.Flags().Lookup("endpoint"))
+	viper.BindPFlag("rotate-rotation-interval", RotateCmd.Flags().Lookup("rotation-interval"))
 }
 
 func rotate(cmd *cobra.Command, args []string) {
@@ -87,31 +84,21 @@ func rotate(cmd *cobra.Command, args []string) {
 		rotateFatal(fmt.Errorf("invalid dns address: %w", err))
 	}
 
-	useV4, useV6 := viper.GetBool("rotate-4"), viper.GetBool("rotate-6")
-	if useV4 && useV6 {
-		rotateFatal(errors.New("cannot force both v4 and v6 at the same time"))
-	}
-	if !useV4 && !useV6 {
-		useV4, useV6 = true, true
-	}
-
-	// Build config - scanning is always enabled
+	// Build config
 	opts := core.RotationConfig{
-		FrontendAddr: &socksAddr,
-		PoolSize:     poolSize,
-		MinBackends:  minBackends,
-		DnsAddr:      dnsAddr,
-		Scan: core.ScanOptions{
-			V4:     useV4,
-			V6:     useV6,
-			MaxRTT: viper.GetDuration("rotate-scan-rtt"),
-		},
+		FrontendAddr:     &socksAddr,
+		PoolSize:         poolSize,
+		MinBackends:      minBackends,
+		DnsAddr:          dnsAddr,
+		Endpoint:         viper.GetString("rotate-endpoint"),
+		RotationInterval: viper.GetDuration("rotate-rotation-interval"),
 	}
 
-	log.Infow("Starting rotation proxy with continuous scanning",
+	log.Infow("Starting rotation proxy",
 		zap.String("socks-addr", socksAddr.String()),
 		zap.Int("pool-size", opts.PoolSize),
-		zap.Int("min-backends", opts.MinBackends))
+		zap.Int("min-backends", opts.MinBackends),
+		zap.Duration("rotation-interval", opts.RotationInterval))
 
 	// Create and run engine
 	engine := core.NewRotationEngine(ctx, opts)

@@ -15,8 +15,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/artbred/cloudflare-warp/cloudflare"
-	"github.com/artbred/cloudflare-warp/cloudflare/network"
-	"github.com/artbred/cloudflare-warp/ipscanner"
 	"github.com/artbred/cloudflare-warp/log"
 )
 
@@ -29,11 +27,12 @@ const (
 
 // RotationConfig holds the configuration for the rotation engine.
 type RotationConfig struct {
-	FrontendAddr *netip.AddrPort
-	PoolSize     int
-	MinBackends  int // Minimum healthy backends required (default: 1)
-	DnsAddr      netip.Addr
-	Scan         ScanOptions // No longer optional - scanning is always enabled
+	FrontendAddr     *netip.AddrPort
+	PoolSize         int
+	MinBackends      int           // Minimum healthy backends required (default: 1)
+	DnsAddr          netip.Addr
+	Endpoint         string        // WARP endpoint (default: engage.cloudflareclient.com:2408)
+	RotationInterval time.Duration // How often to rotate backends (default: 5 minutes)
 }
 
 // Backend represents a single wiresocks instance with its endpoint.
@@ -56,25 +55,26 @@ type RotationEngine struct {
 	nextIndex *atomic.Uint32
 	poolMu    sync.RWMutex
 	frontend  *FrontendProxy
-
-	// Scanner for continuous endpoint discovery
-	scanner         *ipscanner.IPScanner
-	endpointChan    chan string
-	usedEndpoints   map[string]bool
-	usedEndpointsMu sync.Mutex
 }
 
 // NewRotationEngine creates a new rotation engine.
 func NewRotationEngine(ctx context.Context, opts RotationConfig) *RotationEngine {
 	ctx, cancel := context.WithCancel(ctx)
+
+	// Set defaults
+	if opts.Endpoint == "" {
+		opts.Endpoint = "engage.cloudflareclient.com:2408"
+	}
+	if opts.RotationInterval == 0 {
+		opts.RotationInterval = 5 * time.Minute
+	}
+
 	return &RotationEngine{
-		ctx:           ctx,
-		cancel:        cancel,
-		opts:          opts,
-		backends:      make([]*Backend, 0, opts.PoolSize),
-		nextIndex:     atomic.NewUint32(0),
-		endpointChan:  make(chan string, 100),
-		usedEndpoints: make(map[string]bool),
+		ctx:       ctx,
+		cancel:    cancel,
+		opts:      opts,
+		backends:  make([]*Backend, 0, opts.PoolSize),
+		nextIndex: atomic.NewUint32(0),
 	}
 }
 
@@ -95,6 +95,9 @@ func (r *RotationEngine) Run() error {
 	// Start backend health monitor
 	go r.monitorBackends()
 
+	// Start backend rotation
+	go r.rotateBackends()
+
 	// Create and start frontend proxy
 	r.frontend = NewFrontendProxy(r.ctx, *r.opts.FrontendAddr, r.getNextBackend)
 
@@ -112,11 +115,6 @@ func (r *RotationEngine) Stop() {
 	log.Info("Stopping rotation engine...")
 	r.cancel()
 
-	// Stop scanner
-	if r.scanner != nil {
-		r.scanner.Stop()
-	}
-
 	// Stop all backends
 	r.poolMu.Lock()
 	for _, backend := range r.backends {
@@ -129,46 +127,31 @@ func (r *RotationEngine) Stop() {
 	log.Info("Rotation engine stopped")
 }
 
-// initializeBackends creates the initial pool of backend wiresocks instances using the scanner.
+// initializeBackends creates the initial pool of backend wiresocks instances.
 func (r *RotationEngine) initializeBackends() error {
-	// Start the background scanner first
-	if err := r.startBackgroundScanner(); err != nil {
-		return fmt.Errorf("failed to start background scanner: %w", err)
-	}
+	log.Infow("Initializing backend pool",
+		zap.String("endpoint", r.opts.Endpoint),
+		zap.Int("pool_size", r.opts.PoolSize))
 
-	// Wait for scanner to find initial endpoints
-	log.Infow("Waiting for scanner to discover endpoints...",
-		zap.Int("target_size", r.opts.PoolSize))
-
-	minRequired := r.getEffectiveMinBackends()
-	portIndex := 0
-	maxAttempts := r.opts.PoolSize * 10 // Try many endpoints since some will fail
-
-	for attempt := 0; attempt < maxAttempts && len(r.backends) < r.opts.PoolSize; attempt++ {
+	for i := 0; i < r.opts.PoolSize; i++ {
 		select {
 		case <-r.ctx.Done():
 			return r.ctx.Err()
 		default:
 		}
 
-		// Get next endpoint from scanner (wait up to 30s)
-		endpoint, err := r.getNextEndpoint(30 * time.Second)
-		if err != nil {
-			log.Warnw("Timeout waiting for endpoint", zap.Error(err))
-			continue
-		}
+		port := BackendPortStart + i
 
-		port := BackendPortStart + portIndex
-		portIndex++
+		log.Infow("Starting backend",
+			zap.String("endpoint", r.opts.Endpoint),
+			zap.Int("port", port),
+			zap.Int("index", i+1),
+			zap.Int("total", r.opts.PoolSize))
 
-		log.Infow("Trying endpoint",
-			zap.String("endpoint", endpoint),
-			zap.Int("port", port))
-
-		backend, err := r.startBackend(endpoint, port)
+		backend, err := r.startBackend(r.opts.Endpoint, port)
 		if err != nil {
 			log.Warnw("Failed to start backend",
-				zap.String("endpoint", endpoint),
+				zap.Int("port", port),
 				zap.Error(err))
 			continue
 		}
@@ -178,24 +161,17 @@ func (r *RotationEngine) initializeBackends() error {
 		r.poolMu.Unlock()
 
 		log.Infow("Backend started successfully",
-			zap.String("endpoint", backend.endpoint),
 			zap.Int("port", backend.port),
 			zap.Int("backends_ready", len(r.backends)))
 	}
 
 	if len(r.backends) == 0 {
-		return errors.New("no backends started successfully - scanner found no working endpoints")
+		return errors.New("no backends started successfully")
 	}
 
+	minRequired := r.getEffectiveMinBackends()
 	if len(r.backends) < minRequired {
 		return fmt.Errorf("could not start minimum required backends: need %d, started %d", minRequired, len(r.backends))
-	}
-
-	if len(r.backends) < r.opts.PoolSize {
-		log.Warnw("Could not start requested number of backends",
-			zap.Int("requested", r.opts.PoolSize),
-			zap.Int("started", len(r.backends)),
-			zap.Int("minimum_required", minRequired))
 	}
 
 	return nil
@@ -463,37 +439,11 @@ func (r *RotationEngine) monitorBackends() {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
-			r.proactiveHealthChecks()
+			// Only check for crashed backends (context done), not active connectivity
+			// Proactive health checks were too aggressive and killed working backends
 			r.checkAndReplaceUnhealthyBackends()
 		}
 	}
-}
-
-// proactiveHealthChecks tests all backends and marks unresponsive ones as unhealthy.
-func (r *RotationEngine) proactiveHealthChecks() {
-	r.poolMu.RLock()
-	backends := make([]*Backend, len(r.backends))
-	copy(backends, r.backends)
-	r.poolMu.RUnlock()
-
-	var wg sync.WaitGroup
-	for _, backend := range backends {
-		if !backend.healthy.Load() {
-			continue // Already unhealthy
-		}
-
-		wg.Add(1)
-		go func(b *Backend) {
-			defer wg.Done()
-			if !proactiveHealthCheck(b, 5*time.Second) {
-				log.Warnw("Backend failed proactive health check",
-					zap.String("endpoint", b.endpoint),
-					zap.Int("port", b.port))
-				b.healthy.Store(false)
-			}
-		}(backend)
-	}
-	wg.Wait()
 }
 
 // checkAndReplaceUnhealthyBackends removes failed backends and attempts to replace them.
@@ -501,15 +451,15 @@ func (r *RotationEngine) checkAndReplaceUnhealthyBackends() {
 	r.poolMu.Lock()
 	defer r.poolMu.Unlock()
 
-	// Find and remove unhealthy backends
+	// Find and remove crashed backends
 	var healthyBackends []*Backend
 	var availablePorts []int
 
 	for _, backend := range r.backends {
 		select {
 		case <-backend.ctx.Done():
-			// Backend context is done, it failed
-			log.Warnw("Backend failed, removing from pool",
+			// Backend context is done, it crashed
+			log.Warnw("Backend crashed, removing from pool",
 				zap.String("endpoint", backend.endpoint),
 				zap.Int("port", backend.port))
 			availablePorts = append(availablePorts, backend.port)
@@ -541,7 +491,7 @@ func (r *RotationEngine) checkAndReplaceUnhealthyBackends() {
 	}
 }
 
-// replaceBackends attempts to start new backends on the given ports using the scanner.
+// replaceBackends attempts to start new backends on the given ports.
 func (r *RotationEngine) replaceBackends(ports []int) {
 	// Check if engine is shutting down
 	select {
@@ -554,127 +504,83 @@ func (r *RotationEngine) replaceBackends(ports []int) {
 		zap.Int("count", len(ports)))
 
 	for _, port := range ports {
-		// Try up to 5 endpoints per port
-		for attempt := 0; attempt < 5; attempt++ {
-			select {
-			case <-r.ctx.Done():
-				return
-			default:
-			}
-
-			// Get next endpoint from scanner (wait up to 10s)
-			endpoint, err := r.getNextEndpoint(10 * time.Second)
-			if err != nil {
-				log.Warnw("No endpoint available for replacement",
-					zap.Int("port", port),
-					zap.Error(err))
-				break
-			}
-
-			backend, err := r.startBackend(endpoint, port)
-			if err != nil {
-				log.Warnw("Failed to start replacement backend",
-					zap.String("endpoint", endpoint),
-					zap.Int("port", port),
-					zap.Error(err))
-				continue
-			}
-
-			r.poolMu.Lock()
-			r.backends = append(r.backends, backend)
-			r.poolMu.Unlock()
-
-			log.Infow("Replacement backend started",
-				zap.String("endpoint", backend.endpoint),
-				zap.Int("port", backend.port))
-			break // Success, move to next port
+		select {
+		case <-r.ctx.Done():
+			return
+		default:
 		}
+
+		backend, err := r.startBackend(r.opts.Endpoint, port)
+		if err != nil {
+			log.Warnw("Failed to start replacement backend",
+				zap.Int("port", port),
+				zap.Error(err))
+			continue
+		}
+
+		r.poolMu.Lock()
+		r.backends = append(r.backends, backend)
+		r.poolMu.Unlock()
+
+		log.Infow("Replacement backend started",
+			zap.String("endpoint", backend.endpoint),
+			zap.Int("port", backend.port))
 	}
 }
 
-// startBackgroundScanner starts a persistent scanner that feeds endpoints to the channel.
-func (r *RotationEngine) startBackgroundScanner() error {
-	ident, err := cloudflare.LoadOrCreateIdentity()
-	if err != nil {
-		return fmt.Errorf("failed to load identity: %w", err)
-	}
-
-	r.scanner = ipscanner.NewScanner(
-		ipscanner.WithContext(r.ctx),
-		ipscanner.WithWarpPrivateKey(ident.PrivateKey),
-		ipscanner.WithWarpPeerPublicKey(ident.Config.Peers[0].PublicKey),
-		ipscanner.WithUseIPv4(r.opts.Scan.V4),
-		ipscanner.WithUseIPv6(r.opts.Scan.V6),
-		ipscanner.WithMaxDesirableRTT(r.opts.Scan.MaxRTT),
-		ipscanner.WithCidrList(network.ScannerPrefixes()),
-		ipscanner.WithIPQueueSize(r.opts.PoolSize * 3),
-	)
-
-	// Start scanner in background
-	go func() {
-		if err := r.scanner.Run(); err != nil {
-			log.Errorw("Background scanner failed", zap.Error(err))
-		}
-	}()
-
-	// Feed discovered endpoints to channel
-	go r.feedEndpointsFromScanner()
-
-	log.Info("Background scanner started")
-	return nil
-}
-
-// feedEndpointsFromScanner continuously reads from scanner and feeds unique endpoints to channel.
-func (r *RotationEngine) feedEndpointsFromScanner() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+// rotateBackends periodically disconnects and reconnects backends to refresh connections.
+func (r *RotationEngine) rotateBackends() {
+	ticker := time.NewTicker(r.opts.RotationInterval)
 	defer ticker.Stop()
+
+	backendIndex := 0
 
 	for {
 		select {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
-			// Periodic cleanup to prevent unbounded memory growth
-			r.usedEndpointsMu.Lock()
-			if len(r.usedEndpoints) > 10000 {
-				r.usedEndpoints = make(map[string]bool)
-				log.Debug("Reset usedEndpoints tracking to prevent memory growth")
-			}
-			r.usedEndpointsMu.Unlock()
-
-			ips := r.scanner.GetAvailableIPs()
-			for _, ip := range ips {
-				endpoint := ip.AddrPort.String()
-
-				r.usedEndpointsMu.Lock()
-				if !r.usedEndpoints[endpoint] {
-					r.usedEndpoints[endpoint] = true
-					r.usedEndpointsMu.Unlock()
-
-					select {
-					case r.endpointChan <- endpoint:
-						log.Debugw("New endpoint discovered", zap.String("endpoint", endpoint))
-					default:
-						// Channel full, skip
-					}
-				} else {
-					r.usedEndpointsMu.Unlock()
-				}
-			}
+			r.rotateOneBackend(backendIndex)
+			backendIndex = (backendIndex + 1) % r.opts.PoolSize
 		}
 	}
 }
 
-// getNextEndpoint gets the next available endpoint from the scanner.
-// Blocks until an endpoint is available or context is cancelled.
-func (r *RotationEngine) getNextEndpoint(timeout time.Duration) (string, error) {
-	select {
-	case <-r.ctx.Done():
-		return "", r.ctx.Err()
-	case endpoint := <-r.endpointChan:
-		return endpoint, nil
-	case <-time.After(timeout):
-		return "", errors.New("timeout waiting for endpoint from scanner")
+// rotateOneBackend disconnects and reconnects a single backend.
+func (r *RotationEngine) rotateOneBackend(index int) {
+	r.poolMu.Lock()
+	if index >= len(r.backends) {
+		r.poolMu.Unlock()
+		return
 	}
+
+	oldBackend := r.backends[index]
+	port := oldBackend.port
+	r.poolMu.Unlock()
+
+	log.Infow("Rotating backend",
+		zap.Int("index", index),
+		zap.Int("port", port))
+
+	// Start new backend first (use different port temporarily)
+	newBackend, err := r.startBackend(r.opts.Endpoint, port+100)
+	if err != nil {
+		log.Warnw("Failed to start replacement backend during rotation",
+			zap.Int("index", index),
+			zap.Error(err))
+		return
+	}
+
+	// Swap backends
+	r.poolMu.Lock()
+	if index < len(r.backends) {
+		oldBackend.cancel(nil)
+		r.backends[index] = newBackend
+	}
+	r.poolMu.Unlock()
+
+	log.Infow("Backend rotated successfully",
+		zap.Int("index", index),
+		zap.Int("port", newBackend.port))
 }
 
