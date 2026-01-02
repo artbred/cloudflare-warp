@@ -404,15 +404,16 @@ func (r *RotationEngine) getNextBackend() *Backend {
 	r.poolMu.RLock()
 	defer r.poolMu.RUnlock()
 
-	if len(r.backends) == 0 {
+	n := len(r.backends)
+	if n == 0 {
 		return nil
 	}
 
 	// Try to find a healthy backend using round-robin
-	attempts := len(r.backends)
-	for i := 0; i < attempts; i++ {
-		// Add returns new value, so subtract 1 to get 0-based index on first call
-		index := (r.nextIndex.Add(1) - 1) % uint32(len(r.backends))
+	// Capture length once and use it consistently
+	startIndex := r.nextIndex.Add(1) - 1
+	for i := uint32(0); i < uint32(n); i++ {
+		index := (startIndex + i) % uint32(n)
 		backend := r.backends[index]
 
 		if backend.healthy.Load() {
