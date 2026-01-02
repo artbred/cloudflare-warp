@@ -16,7 +16,6 @@ import (
 
 	"github.com/artbred/cloudflare-warp/cloudflare"
 	"github.com/artbred/cloudflare-warp/cloudflare/network"
-	"github.com/artbred/cloudflare-warp/core/cache"
 	"github.com/artbred/cloudflare-warp/ipscanner"
 	"github.com/artbred/cloudflare-warp/log"
 )
@@ -481,7 +480,6 @@ func (r *RotationEngine) checkAndReplaceUnhealthyBackends() {
 
 	// Find and remove unhealthy backends
 	var healthyBackends []*Backend
-	var failedEndpoints []string
 	var availablePorts []int
 
 	for _, backend := range r.backends {
@@ -491,8 +489,6 @@ func (r *RotationEngine) checkAndReplaceUnhealthyBackends() {
 			log.Warnw("Backend failed, removing from pool",
 				zap.String("endpoint", backend.endpoint),
 				zap.Int("port", backend.port))
-			r.cache.RecordFailure(backend.endpoint)
-			failedEndpoints = append(failedEndpoints, backend.endpoint)
 			availablePorts = append(availablePorts, backend.port)
 		default:
 			if backend.healthy.Load() {
@@ -501,8 +497,6 @@ func (r *RotationEngine) checkAndReplaceUnhealthyBackends() {
 				log.Warnw("Backend marked unhealthy, removing from pool",
 					zap.String("endpoint", backend.endpoint),
 					zap.Int("port", backend.port))
-				r.cache.RecordFailure(backend.endpoint)
-				failedEndpoints = append(failedEndpoints, backend.endpoint)
 				availablePorts = append(availablePorts, backend.port)
 				backend.cancel(errors.New("marked unhealthy"))
 			}
@@ -520,12 +514,12 @@ func (r *RotationEngine) checkAndReplaceUnhealthyBackends() {
 
 	// Try to replace failed backends
 	if len(availablePorts) > 0 {
-		go r.replaceBackends(availablePorts, failedEndpoints)
+		go r.replaceBackends(availablePorts)
 	}
 }
 
-// replaceBackends attempts to start new backends on the given ports.
-func (r *RotationEngine) replaceBackends(ports []int, failedEndpoints []string) {
+// replaceBackends attempts to start new backends on the given ports using the scanner.
+func (r *RotationEngine) replaceBackends(ports []int) {
 	// Check if engine is shutting down
 	select {
 	case <-r.ctx.Done():
@@ -533,44 +527,45 @@ func (r *RotationEngine) replaceBackends(ports []int, failedEndpoints []string) 
 	default:
 	}
 
-	// Get new endpoints from cache
-	endpoints, err := r.cache.GetDistinctRandomEndpoints(len(ports))
-	if err != nil {
-		log.Errorw("Failed to get replacement endpoints", zap.Error(err))
-		return
-	}
+	log.Infow("Attempting to replace failed backends",
+		zap.Int("count", len(ports)))
 
-	// Filter out endpoints that just failed
-	failedSet := make(map[string]bool)
-	for _, e := range failedEndpoints {
-		failedSet[e] = true
-	}
+	for _, port := range ports {
+		// Try up to 5 endpoints per port
+		for attempt := 0; attempt < 5; attempt++ {
+			select {
+			case <-r.ctx.Done():
+				return
+			default:
+			}
 
-	var validEndpoints []string
-	for _, e := range endpoints {
-		if !failedSet[e] {
-			validEndpoints = append(validEndpoints, e)
+			// Get next endpoint from scanner (wait up to 10s)
+			endpoint, err := r.getNextEndpoint(10 * time.Second)
+			if err != nil {
+				log.Warnw("No endpoint available for replacement",
+					zap.Int("port", port),
+					zap.Error(err))
+				break
+			}
+
+			backend, err := r.startBackend(endpoint, port)
+			if err != nil {
+				log.Warnw("Failed to start replacement backend",
+					zap.String("endpoint", endpoint),
+					zap.Int("port", port),
+					zap.Error(err))
+				continue
+			}
+
+			r.poolMu.Lock()
+			r.backends = append(r.backends, backend)
+			r.poolMu.Unlock()
+
+			log.Infow("Replacement backend started",
+				zap.String("endpoint", backend.endpoint),
+				zap.Int("port", backend.port))
+			break // Success, move to next port
 		}
-	}
-
-	// Start replacement backends
-	for i := 0; i < len(ports) && i < len(validEndpoints); i++ {
-		backend, err := r.startBackend(validEndpoints[i], ports[i])
-		if err != nil {
-			log.Errorw("Failed to start replacement backend",
-				zap.String("endpoint", validEndpoints[i]),
-				zap.Int("port", ports[i]),
-				zap.Error(err))
-			continue
-		}
-
-		r.poolMu.Lock()
-		r.backends = append(r.backends, backend)
-		r.poolMu.Unlock()
-
-		log.Infow("Replacement backend started",
-			zap.String("endpoint", backend.endpoint),
-			zap.Int("port", backend.port))
 	}
 }
 
