@@ -273,8 +273,8 @@ func (r *RotationEngine) startBackend(endpoint string, port int) (*Backend, erro
 	return backend, nil
 }
 
-// startBackendWithUniqueIP starts a backend and ensures it has a unique exit IP.
-// If the exit IP matches an existing backend, it waits 5 seconds and retries once.
+// startBackendWithUniqueIP starts a backend and queries its exit IP.
+// With unique identities per backend, Cloudflare assigns unique IPs naturally.
 func (r *RotationEngine) startBackendWithUniqueIP(endpoint string, port int, usedIPs map[netip.Addr]bool) (*Backend, error) {
 	backend, err := r.startBackend(endpoint, port)
 	if err != nil {
@@ -297,47 +297,9 @@ func (r *RotationEngine) startBackendWithUniqueIP(endpoint string, port int, use
 		zap.Int("port", port),
 		zap.String("exit_ip", exitIP.String()))
 
-	// Check if IP is unique
-	if !usedIPs[exitIP] {
-		return backend, nil
-	}
-
-	log.Warnw("Backend has duplicate exit IP, will retry",
-		zap.Int("port", port),
-		zap.String("exit_ip", exitIP.String()))
-
-	// Cancel current backend
-	backend.cancel(nil)
-
-	// Wait 5 seconds before retry
-	select {
-	case <-r.ctx.Done():
-		return nil, r.ctx.Err()
-	case <-time.After(5 * time.Second):
-	}
-
-	// Retry once
-	backend, err = r.startBackend(endpoint, port)
-	if err != nil {
-		return nil, fmt.Errorf("retry failed: %w", err)
-	}
-
-	// Query exit IP again
-	exitIP, err = getExitIP(proxyAddr, 10*time.Second)
-	if err != nil {
-		log.Warnw("Failed to get exit IP on retry",
-			zap.Int("port", port),
-			zap.Error(err))
-		return backend, nil
-	}
-
-	backend.exitIP = exitIP
-	log.Infow("Backend exit IP on retry",
-		zap.Int("port", port),
-		zap.String("exit_ip", exitIP.String()))
-
+	// Log if duplicate (informational only - shouldn't happen with unique identities)
 	if usedIPs[exitIP] {
-		log.Warnw("Backend still has duplicate exit IP after retry, accepting anyway",
+		log.Warnw("Backend has duplicate exit IP despite unique identity",
 			zap.Int("port", port),
 			zap.String("exit_ip", exitIP.String()))
 	}
