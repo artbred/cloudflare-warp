@@ -125,108 +125,62 @@ func (r *RotationEngine) Stop() {
 	log.Info("Rotation engine stopped")
 }
 
-// initializeBackends creates the initial pool of backend wiresocks instances.
+// initializeBackends creates the initial pool of backend wiresocks instances using the scanner.
 func (r *RotationEngine) initializeBackends() error {
-	// Get more endpoints than needed since some may fail
-	endpointsToTry := r.opts.PoolSize * 5
-	if endpointsToTry < 15 {
-		endpointsToTry = 15
+	// Start the background scanner first
+	if err := r.startBackgroundScanner(); err != nil {
+		return fmt.Errorf("failed to start background scanner: %w", err)
 	}
 
-	endpoints, err := r.cache.GetDistinctRandomEndpoints(endpointsToTry)
-	if err != nil {
-		log.Infow("Cache has insufficient endpoints, running scanner...")
-		scannedEndpoints, scanErr := r.getScannerEndpoints()
-		if scanErr != nil {
-			return fmt.Errorf("failed to get endpoints from scan: %w", scanErr)
-		}
-		endpoints = scannedEndpoints
-	}
-
-	log.Infow("Initializing backend pool",
-		zap.Int("target_size", r.opts.PoolSize),
-		zap.Int("endpoints_to_try", len(endpoints)))
-
-	// Try endpoints in parallel batches for faster initialization
-	const batchSize = 5
-	portIndex := 0
-
-	for batchStart := 0; batchStart < len(endpoints) && len(r.backends) < r.opts.PoolSize; batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-		if batchEnd > len(endpoints) {
-			batchEnd = len(endpoints)
-		}
-
-		batch := endpoints[batchStart:batchEnd]
-		results := make(chan *Backend, len(batch))
-		var wg sync.WaitGroup
-
-		for i, endpoint := range batch {
-			if len(r.backends)+i >= r.opts.PoolSize+len(batch) {
-				break
-			}
-
-			wg.Add(1)
-			go func(ep string, port int) {
-				defer wg.Done()
-
-				select {
-				case <-r.ctx.Done():
-					return
-				default:
-				}
-
-				log.Infow("Trying endpoint",
-					zap.String("endpoint", ep),
-					zap.Int("port", port))
-
-				backend, err := r.startBackend(ep, port)
-				if err != nil {
-					log.Warnw("Failed to start backend",
-						zap.String("endpoint", ep),
-						zap.Error(err))
-					r.cache.RecordFailure(ep)
-					return
-				}
-
-				results <- backend
-			}(endpoint, BackendPortStart+portIndex+i)
-		}
-
-		// Wait for batch and collect results
-		go func() {
-			wg.Wait()
-			close(results)
-		}()
-
-		for backend := range results {
-			if len(r.backends) >= r.opts.PoolSize {
-				// We have enough, cancel this backend
-				backend.cancel(nil)
-				continue
-			}
-
-			r.poolMu.Lock()
-			r.backends = append(r.backends, backend)
-			r.poolMu.Unlock()
-
-			log.Infow("Backend started successfully",
-				zap.String("endpoint", backend.endpoint),
-				zap.Int("port", backend.port),
-				zap.Int("backends_ready", len(r.backends)))
-		}
-
-		portIndex += len(batch)
-
-		if len(r.backends) >= r.opts.PoolSize {
-			break
-		}
-	}
+	// Wait for scanner to find initial endpoints
+	log.Infow("Waiting for scanner to discover endpoints...",
+		zap.Int("target_size", r.opts.PoolSize))
 
 	minRequired := r.getEffectiveMinBackends()
+	portIndex := 0
+	maxAttempts := r.opts.PoolSize * 10 // Try many endpoints since some will fail
+
+	for attempt := 0; attempt < maxAttempts && len(r.backends) < r.opts.PoolSize; attempt++ {
+		select {
+		case <-r.ctx.Done():
+			return r.ctx.Err()
+		default:
+		}
+
+		// Get next endpoint from scanner (wait up to 30s)
+		endpoint, err := r.getNextEndpoint(30 * time.Second)
+		if err != nil {
+			log.Warnw("Timeout waiting for endpoint", zap.Error(err))
+			continue
+		}
+
+		port := BackendPortStart + portIndex
+		portIndex++
+
+		log.Infow("Trying endpoint",
+			zap.String("endpoint", endpoint),
+			zap.Int("port", port))
+
+		backend, err := r.startBackend(endpoint, port)
+		if err != nil {
+			log.Warnw("Failed to start backend",
+				zap.String("endpoint", endpoint),
+				zap.Error(err))
+			continue
+		}
+
+		r.poolMu.Lock()
+		r.backends = append(r.backends, backend)
+		r.poolMu.Unlock()
+
+		log.Infow("Backend started successfully",
+			zap.String("endpoint", backend.endpoint),
+			zap.Int("port", backend.port),
+			zap.Int("backends_ready", len(r.backends)))
+	}
 
 	if len(r.backends) == 0 {
-		return errors.New("no backends started successfully - all endpoints failed")
+		return errors.New("no backends started successfully - scanner found no working endpoints")
 	}
 
 	if len(r.backends) < minRequired {
