@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -33,6 +34,21 @@ const (
 // getBackendIdentityDir returns the identity directory for a specific backend.
 func getBackendIdentityDir(port int) string {
 	return filepath.Join(datadir.GetDataDir(), fmt.Sprintf("backend-%d", port))
+}
+
+// cleanupBackendIdentity removes identity directory for a backend that is no longer running.
+// Called during graceful shutdown or when cleaning up old backends.
+func cleanupBackendIdentity(port int) {
+	identityDir := getBackendIdentityDir(port)
+	if err := os.RemoveAll(identityDir); err != nil {
+		log.Warnw("Failed to cleanup backend identity directory",
+			zap.Int("port", port),
+			zap.String("dir", identityDir),
+			zap.Error(err))
+	} else {
+		log.Debugw("Cleaned up backend identity directory",
+			zap.Int("port", port))
+	}
 }
 
 // RotationConfig holds the configuration for the rotation engine.
@@ -701,6 +717,8 @@ func (r *RotationEngine) rotateOneBackend(index int) {
 	if index < len(r.backends) {
 		// Cancel old backend
 		oldBackend.cancel(nil)
+		// Clean up old backend's identity
+		go cleanupBackendIdentity(oldBackend.port)
 		// Replace with new backend
 		r.backends[index] = newBackend
 	}
